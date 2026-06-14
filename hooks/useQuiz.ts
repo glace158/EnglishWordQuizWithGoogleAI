@@ -1,7 +1,7 @@
 
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { Word, QuizMode, SelectionMode, QuizState, VoiceName } from '../types';
-import { speakText, generateAISentence, generateAIDictationSentence, evaluateTranslation, evaluateDictation, getRemainingQuota } from '../services/geminiService';
+import { speakText, generateAISentence, generateAIDictationSentence, generateDETTask, evaluateTranslation, evaluateDictation, evaluateDETResponse, getRemainingQuota } from '../services/geminiService';
 
 export const useQuiz = (
   words: Word[], 
@@ -9,15 +9,16 @@ export const useQuiz = (
   selectedVoice: VoiceName
 ) => {
   const [quizMode, setQuizMode] = useState<QuizMode>(QuizMode.KR_TO_EN);
-  const [selectionMode, setSelectionMode] = useState<SelectionMode>(SelectionMode.ORDERED);
+  const [selectionMode, setSelectionMode] = useState<SelectionMode>(SelectionMode.RANDOM);
   const [excludeMastered, setExcludeMastered] = useState(false);
   const [lastWordId, setLastWordId] = useState<string | null>(null);
   const [remainingQuota, setRemainingQuota] = useState(getRemainingQuota());
   
   const initialQuizState: QuizState = {
-    currentWord: null, userInput: '', isSubmitted: false, isCorrect: false, showHint: false, message: '', isSpeaking: false, isListening: false, isAiLoading: false
+    currentWord: null, userInput: '', isSubmitted: false, isCorrect: false, showHint: false, message: '', isSpeaking: false, isListening: false, isAiLoading: false, showModelAnswer: false, timerSeconds: 0, isTimerActive: false
   };
   const [state, setState] = useState<QuizState>(initialQuizState);
+  const timerRef = useRef<any>(null);
 
   const [matchPool, setMatchPool] = useState<Word[]>([]);
   const [selectedKrId, setSelectedKrId] = useState<string | null>(null);
@@ -33,8 +34,8 @@ export const useQuiz = (
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) return null;
     const rec = new SpeechRecognition();
-    rec.continuous = false;
-    rec.interimResults = false;
+    rec.continuous = true;
+    rec.interimResults = true;
     rec.lang = 'en-US';
     return rec;
   }, []);
@@ -48,12 +49,26 @@ export const useQuiz = (
     recognition.start();
 
     recognition.onresult = (event: any) => {
-      const transcript = event.results[0][0].transcript;
-      setState(prev => ({ ...prev, userInput: transcript, isListening: false }));
+      let finalTranscript = '';
+      for (let i = event.resultIndex; i < event.results.length; ++i) {
+        if (event.results[i].isFinal) {
+          finalTranscript += event.results[i][0].transcript + ' ';
+        }
+      }
+      if (finalTranscript) {
+        setState(prev => ({ ...prev, userInput: prev.userInput + finalTranscript }));
+      }
     };
 
     recognition.onerror = () => setState(prev => ({ ...prev, isListening: false }));
     recognition.onend = () => setState(prev => ({ ...prev, isListening: false }));
+  }, [recognition]);
+
+  const stopListening = useCallback(() => {
+    if (recognition) {
+      recognition.stop();
+      setState(prev => ({ ...prev, isListening: false }));
+    }
   }, [recognition]);
 
   const generateMatchPool = useCallback(() => {
@@ -67,13 +82,28 @@ export const useQuiz = (
     setErrorIds(new Set());
   }, [words, excludeMastered]);
 
+  const startTimer = useCallback((seconds: number) => {
+    setState(prev => ({ ...prev, timerSeconds: seconds, isTimerActive: true }));
+    if (timerRef.current) clearInterval(timerRef.current);
+    timerRef.current = setInterval(() => {
+      setState(prev => {
+        if (prev.timerSeconds && prev.timerSeconds > 0) {
+          return { ...prev, timerSeconds: prev.timerSeconds - 1 };
+        } else {
+          clearInterval(timerRef.current);
+          return { ...prev, isTimerActive: false };
+        }
+      });
+    }, 1000);
+  }, []);
+
   const getNextWord = useCallback(async (forcedMode?: any) => {
-    // 클릭 이벤트 객체가 들어올 수 있으므로 문자열 타입일 때만 forcedMode로 인정
-    const activeMode = (typeof forcedMode === 'string') ? forcedMode : quizMode;
+    const activeMode = (forcedMode && typeof forcedMode === 'string') ? forcedMode : quizMode;
     
     if (window.speechSynthesis) {
       window.speechSynthesis.cancel();
     }
+    if (timerRef.current) clearInterval(timerRef.current);
 
     if (activeMode === QuizMode.WORD_MATCH) {
       generateMatchPool();
@@ -81,74 +111,91 @@ export const useQuiz = (
       return;
     }
 
-    if (words.length === 0) return;
+    const isDetMode = activeMode === QuizMode.DET_SPEAKING || activeMode === QuizMode.DET_WRITING;
+
+    if (words.length === 0 && !isDetMode) return;
     const now = Date.now();
     const unmastered = words.filter(w => !w.isMastered);
     const pool = (excludeMastered && unmastered.length > 0) ? unmastered : words;
-    if (pool.length === 0) return;
-
-    let next: Word;
-    if (selectionMode === SelectionMode.ORDERED) {
-      const currentIndex = state.currentWord ? words.findIndex(w => w.id === state.currentWord?.id) : -1;
-      let nextIndex = (currentIndex + 1) % words.length;
-      let attempts = 0;
-      while (excludeMastered && words[nextIndex]?.isMastered && attempts < words.length) {
-        nextIndex = (nextIndex + 1) % words.length;
-        attempts++;
-      }
-      next = words[nextIndex];
-    } else {
-      const dueWords = pool.filter(w => w.nextReview <= now);
-      if (dueWords.length > 0) {
-        const sortedDue = [...dueWords].sort((a, b) => a.nextReview - b.nextReview);
-        next = sortedDue[0];
+    
+    let next: Word | null = null;
+    if (!isDetMode) {
+      if (pool.length === 0) return;
+      if (selectionMode === SelectionMode.ORDERED) {
+        const currentIndex = state.currentWord ? words.findIndex(w => w.id === state.currentWord?.id) : -1;
+        let nextIndex = (currentIndex + 1) % words.length;
+        let attempts = 0;
+        while (excludeMastered && words[nextIndex]?.isMastered && attempts < words.length) {
+          nextIndex = (nextIndex + 1) % words.length;
+          attempts++;
+        }
+        next = words[nextIndex];
       } else {
-        const randomPool = pool.flatMap(w => Array(Math.max(1, w.incorrectCount - w.correctCount + 5)).fill(w));
+        const randomPool = pool.flatMap(w => {
+          let weight = Math.max(1, w.incorrectCount - w.correctCount + 5);
+          if (w.nextReview <= now) weight += 3;
+          return Array(weight).fill(w);
+        });
         let filteredPool = randomPool;
-        if (pool.length > 1 && lastWordId) filteredPool = randomPool.filter(w => w.id !== lastWordId);
+        if (pool.length > 1 && lastWordId) {
+          const tempPool = randomPool.filter(w => w.id !== lastWordId);
+          if (tempPool.length > 0) filteredPool = tempPool;
+        }
         next = filteredPool[Math.floor(Math.random() * filteredPool.length)];
       }
+      setLastWordId(next.id);
     }
-    
-    setLastWordId(next.id);
 
-    if (activeMode === QuizMode.AI_SENTENCE_GEN) {
+    if (activeMode === QuizMode.AI_SENTENCE_GEN && next) {
       setState({ ...initialQuizState, currentWord: next, isAiLoading: true });
       const sentence = await generateAISentence(next.en, next.kr);
       refreshQuota();
       setState(prev => ({ ...prev, aiContextSentence: sentence, isAiLoading: false }));
-    } else if (activeMode === QuizMode.AI_DICTATION) {
+    } else if (activeMode === QuizMode.AI_DICTATION && next) {
       setState({ ...initialQuizState, currentWord: next, isAiLoading: true });
       const sentence = await generateAIDictationSentence(next.en);
       refreshQuota();
       setState(prev => ({ ...prev, aiDictationSentence: sentence, isAiLoading: false }));
-      
       setTimeout(() => {
         speakText(sentence, selectedVoice).catch(err => console.error("Auto-play failed:", err));
       }, 150);
-    } else {
+    } else if (isDetMode) {
+      setState({ ...initialQuizState, currentWord: null, isAiLoading: true });
+      const type = activeMode === QuizMode.DET_SPEAKING ? 'SPEAKING' : 'WRITING';
+      const detTask = await generateDETTask(type);
+      refreshQuota();
+      setState(prev => ({ ...prev, detTask, isAiLoading: false }));
+      const duration = activeMode === QuizMode.DET_SPEAKING ? 180 : 300;
+      startTimer(duration);
+    } else if (next) {
       setState({ ...initialQuizState, currentWord: next });
     }
-  }, [words, quizMode, selectionMode, excludeMastered, state.currentWord, generateMatchPool, lastWordId, refreshQuota, selectedVoice]);
+  }, [words, quizMode, selectionMode, excludeMastered, state.currentWord, generateMatchPool, lastWordId, refreshQuota, selectedVoice, startTimer]);
 
   useEffect(() => {
-    if (words.length > 0) {
+    const isDetMode = quizMode === QuizMode.DET_SPEAKING || quizMode === QuizMode.DET_WRITING;
+    if (words.length > 0 || isDetMode) {
       if (quizMode === QuizMode.WORD_MATCH) {
         if (matchPool.length === 0) generateMatchPool();
       } else {
-        if (!state.currentWord) getNextWord();
+        if (!state.currentWord && !state.detTask) getNextWord();
       }
     }
-  }, [words, state.currentWord, quizMode, getNextWord, generateMatchPool, matchPool.length]);
+  }, [words, state.currentWord, state.detTask, quizMode, getNextWord, generateMatchPool, matchPool.length]);
 
   const handleSubmit = useCallback(async () => {
-    if (!state.currentWord || state.isSubmitted || !state.userInput.trim() || state.isAiLoading) return;
+    const isDetMode = quizMode === QuizMode.DET_SPEAKING || quizMode === QuizMode.DET_WRITING;
+    if ((!state.currentWord && !isDetMode) || state.isSubmitted || !state.userInput.trim() || state.isAiLoading) return;
     
-    const input = state.userInput.trim().toLowerCase();
+    if (timerRef.current) clearInterval(timerRef.current);
+    if (state.isListening) stopListening();
+
+    const input = state.userInput.trim();
     let isCorrect = false;
     let aiFeedback = "";
+    let detFeedbackData = undefined;
 
-    if (quizMode === QuizMode.AI_SENTENCE_GEN) {
+    if (quizMode === QuizMode.AI_SENTENCE_GEN && state.currentWord) {
       setState(prev => ({ ...prev, isAiLoading: true }));
       const evaluation = await evaluateTranslation(
         state.currentWord.en, 
@@ -164,17 +211,23 @@ export const useQuiz = (
       const original = state.aiDictationSentence || "";
       isCorrect = normalize(input) === normalize(original);
       aiFeedback = ""; 
-    } else if (quizMode === QuizMode.KR_TO_EN) {
-      isCorrect = input === state.currentWord.en.toLowerCase();
-    } else if (quizMode === QuizMode.EN_TO_KR) {
+    } else if (quizMode === QuizMode.KR_TO_EN && state.currentWord) {
+      isCorrect = input.toLowerCase() === state.currentWord.en.toLowerCase();
+    } else if (quizMode === QuizMode.EN_TO_KR && state.currentWord) {
       isCorrect = state.currentWord.kr.split(/[,/]/).some(m => 
-        m.trim().toLowerCase() === input || m.trim().toLowerCase().includes(input)
+        m.trim().toLowerCase() === input.toLowerCase() || m.trim().toLowerCase().includes(input.toLowerCase())
       );
-    } else if (quizMode === QuizMode.EXAMPLE_GAP) {
-      isCorrect = input === state.currentWord.en.toLowerCase();
+    } else if (quizMode === QuizMode.EXAMPLE_GAP && state.currentWord) {
+      isCorrect = input.toLowerCase() === state.currentWord.en.toLowerCase();
+    } else if (isDetMode) {
+      setState(prev => ({ ...prev, isAiLoading: true }));
+      const type = quizMode === QuizMode.DET_SPEAKING ? 'SPEAKING' : 'WRITING';
+      detFeedbackData = await evaluateDETResponse(type, state.detTask?.task || "", state.userInput);
+      refreshQuota();
+      isCorrect = true;
     }
 
-    if (quizMode !== QuizMode.AI_DICTATION) {
+    if (![QuizMode.AI_DICTATION, QuizMode.DET_SPEAKING, QuizMode.DET_WRITING].includes(quizMode) && state.currentWord) {
       setWords(prev => prev.map(w => {
         if (w.id !== state.currentWord?.id) return w;
         let nextRepetitions = isCorrect ? w.repetitions + 1 : 0;
@@ -194,16 +247,16 @@ export const useQuiz = (
       }));
     }
 
-    setState(prev => ({ ...prev, isSubmitted: true, isCorrect, aiFeedback, isAiLoading: false }));
+    setState(prev => ({ ...prev, isSubmitted: true, isCorrect, aiFeedback, detFeedback: detFeedbackData, isAiLoading: false, isTimerActive: false }));
     
-    if (quizMode !== QuizMode.AI_DICTATION) {
-      if (isCorrect && quizMode !== QuizMode.AI_SENTENCE_GEN) {
+    if (!isDetMode && quizMode !== QuizMode.AI_DICTATION) {
+      if (isCorrect && quizMode !== QuizMode.AI_SENTENCE_GEN && state.currentWord) {
         speakText(quizMode === QuizMode.EXAMPLE_GAP ? state.currentWord.example : state.currentWord.en, selectedVoice);
       } else if (quizMode === QuizMode.AI_SENTENCE_GEN) {
         speakText(state.userInput, selectedVoice);
       }
     }
-  }, [state.currentWord, state.isSubmitted, state.userInput, state.aiContextSentence, state.aiDictationSentence, state.isAiLoading, quizMode, setWords, selectedVoice, refreshQuota]);
+  }, [state.currentWord, state.isSubmitted, state.userInput, state.aiContextSentence, state.aiDictationSentence, state.isAiLoading, state.isListening, state.detTask, quizMode, setWords, selectedVoice, refreshQuota, stopListening]);
 
   const handleMatchClick = useCallback((id: string, type: 'kr' | 'en') => {
     if (matchedIds.has(id)) return;
@@ -237,6 +290,6 @@ export const useQuiz = (
   return useMemo(() => ({
     quizMode, setQuizMode, selectionMode, setSelectionMode, excludeMastered, setExcludeMastered, state, setState, 
     matchPool, getNextWord, handleSubmit, initialQuizState, handleMatchClick, matchedIds, selectedKrId, selectedEnId, errorIds, generateMatchPool,
-    toggleCurrentMastery, startListening, remainingQuota
-  }), [quizMode, selectionMode, excludeMastered, state, matchPool, matchedIds, selectedKrId, selectedEnId, errorIds, getNextWord, handleSubmit, generateMatchPool, initialQuizState, handleMatchClick, toggleCurrentMastery, startListening, remainingQuota]);
+    toggleCurrentMastery, startListening, stopListening, remainingQuota
+  }), [quizMode, selectionMode, excludeMastered, state, matchPool, matchedIds, selectedKrId, selectedEnId, errorIds, getNextWord, handleSubmit, generateMatchPool, initialQuizState, handleMatchClick, toggleCurrentMastery, startListening, stopListening, remainingQuota]);
 };

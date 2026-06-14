@@ -1,7 +1,7 @@
 {
-  "name": "VocaMaster AI",
+  "name": "Copy of VocaMaster AI",
   "description": "An intelligent English vocabulary learning application featuring three quiz modes, AI-powered text-to-speech, and weighted random learning based on your progress.",
   "requestFramePermissions": [
     "microphone"
   ]
-}
+} 

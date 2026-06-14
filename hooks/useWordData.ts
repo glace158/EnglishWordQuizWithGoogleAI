@@ -1,6 +1,6 @@
 
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { Word } from '../types';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { Word, Wordbook } from '../types';
 import { INITIAL_WORDS } from '../constants';
 import { hashString } from '../utils/crypto';
 
@@ -20,9 +20,9 @@ const SQL_DATA_URL = PROJECT_URL ? `${PROJECT_URL}/rest/v1/word_data` : "";
 
 const workerCode = `
   self.onmessage = function(e) {
-    const { words } = e.data;
+    const { data } = e.data;
     try {
-      const json = JSON.stringify(words);
+      const json = JSON.stringify(data);
       self.postMessage({ json });
     } catch (err) {
       self.postMessage({ error: err.message });
@@ -31,7 +31,8 @@ const workerCode = `
 `;
 
 export const useWordData = () => {
-  const [words, setWordsInternal] = useState<Word[]>([]);
+  const [wordbooks, setWordbooks] = useState<Wordbook[]>([]);
+  const [activeBookId, setActiveBookId] = useState<string>('');
   const [isLoaded, setIsLoaded] = useState(false);
   const [syncId, setSyncId] = useState<string>('');
   const [syncPassword, setSyncPassword] = useState<string>('');
@@ -43,7 +44,7 @@ export const useWordData = () => {
     const blob = new Blob([workerCode], { type: 'application/javascript' });
     const worker = new Worker(URL.createObjectURL(blob));
     worker.onmessage = (e) => {
-      if (e.data.json) localStorage.setItem('voca_words', e.data.json);
+      if (e.data.json) localStorage.setItem('voca_wordbooks_v2', e.data.json);
     };
     workerRef.current = worker;
     return () => worker.terminate();
@@ -60,32 +61,96 @@ export const useWordData = () => {
     }));
   }, []);
 
+  // 현재 활성화된 단어장의 단어들
+  const words = useMemo(() => {
+    const active = wordbooks.find(b => b.id === activeBookId);
+    return active ? active.words : [];
+  }, [wordbooks, activeBookId]);
+
+  // App.tsx 등에서 기존과 동일한 인터페이스로 단어를 업데이트할 수 있도록 감싸기
   const setWords = useCallback((updater: any) => {
-    setWordsInternal(prev => {
-      const next = typeof updater === 'function' ? updater(prev) : updater;
-      return normalizeWords(Array.isArray(next) ? next : []);
+    setWordbooks(prev => {
+      return prev.map(book => {
+        if (book.id !== activeBookId) return book;
+        const nextWordsRaw = typeof updater === 'function' ? updater(book.words) : updater;
+        return { ...book, words: normalizeWords(Array.isArray(nextWordsRaw) ? nextWordsRaw : []) };
+      });
     });
-  }, [normalizeWords]);
+  }, [activeBookId, normalizeWords]);
 
   useEffect(() => {
-    const saved = localStorage.getItem('voca_words');
-    if (saved) {
+    // 1. 새 구조 로드
+    const savedBooks = localStorage.getItem('voca_wordbooks_v2');
+    const oldWords = localStorage.getItem('voca_words');
+
+    if (savedBooks) {
       try {
-        const parsed = JSON.parse(saved);
-        setWordsInternal(normalizeWords(Array.isArray(parsed) ? parsed : INITIAL_WORDS));
+        const parsed = JSON.parse(savedBooks);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setWordbooks(parsed);
+          setActiveBookId(parsed[0].id);
+        } else {
+          throw new Error('Empty books');
+        }
       } catch (e) {
-        setWordsInternal(normalizeWords(INITIAL_WORDS));
+        const defaultBook = { id: 'default', name: 'Main Library', words: INITIAL_WORDS, createdAt: Date.now() };
+        setWordbooks([defaultBook]);
+        setActiveBookId('default');
+      }
+    } else if (oldWords) {
+      // 2. 마이그레이션 (v1 -> v2)
+      try {
+        const parsed = JSON.parse(oldWords);
+        const migratedBook = { id: 'migrated', name: 'Migrated Library', words: normalizeWords(parsed), createdAt: Date.now() };
+        setWordbooks([migratedBook]);
+        setActiveBookId('migrated');
+      } catch (e) {
+        const defaultBook = { id: 'default', name: 'Main Library', words: INITIAL_WORDS, createdAt: Date.now() };
+        setWordbooks([defaultBook]);
+        setActiveBookId('default');
       }
     } else {
-      setWordsInternal(normalizeWords(INITIAL_WORDS));
+      // 3. 초기 상태
+      const defaultBook = { id: 'default', name: 'Main Library', words: INITIAL_WORDS, createdAt: Date.now() };
+      setWordbooks([defaultBook]);
+      setActiveBookId('default');
     }
     setIsLoaded(true);
   }, [normalizeWords]);
 
+  // 로컬스토리지 저장 (워커 이용)
   useEffect(() => {
     if (!isLoaded || !workerRef.current) return;
-    workerRef.current.postMessage({ words });
-  }, [words, isLoaded]);
+    workerRef.current.postMessage({ data: wordbooks });
+  }, [wordbooks, isLoaded]);
+
+  // 단어장 관리 함수들
+  const addWordbook = (name: string) => {
+    const newId = `book-${Date.now()}`;
+    const newBook: Wordbook = {
+      id: newId,
+      name: name || `New Book ${wordbooks.length + 1}`,
+      words: [],
+      createdAt: Date.now()
+    };
+    setWordbooks(prev => [...prev, newBook]);
+    setActiveBookId(newId);
+  };
+
+  const removeWordbook = (id: string) => {
+    if (wordbooks.length <= 1) return alert('최소 한 개의 단어장은 유지해야 합니다.');
+    if (!window.confirm('이 단어장의 모든 데이터가 삭제됩니다. 계속하시겠습니까?')) return;
+    
+    setWordbooks(prev => {
+      const filtered = prev.filter(b => b.id !== id);
+      if (activeBookId === id) setActiveBookId(filtered[0].id);
+      return filtered;
+    });
+  };
+
+  const renameWordbook = (id: string, newName: string) => {
+    setWordbooks(prev => prev.map(b => b.id === id ? { ...b, name: newName } : b));
+  };
 
   const saveToSQL = async () => {
     if (!SQL_DATA_URL || !SQL_API_KEY) return alert('서버 설정이 누락되었습니다.');
@@ -106,6 +171,7 @@ export const useWordData = () => {
         return alert('❌ 보안 오류: 비밀번호가 일치하지 않습니다.');
       }
 
+      // 전체 단어장 목록을 저장하도록 수정
       const response = await fetch(`${SQL_DATA_URL}?on_conflict=id`, {
         method: 'POST',
         headers: {
@@ -116,7 +182,7 @@ export const useWordData = () => {
         },
         body: JSON.stringify({ 
           id: idHash, 
-          content: words, 
+          content: wordbooks, // wordbooks 전체 저장
           password: passHash,
           updated_at: new Date().toISOString() 
         }),
@@ -143,7 +209,16 @@ export const useWordData = () => {
       });
       const data = await response.json();
       if (Array.isArray(data) && data.length > 0 && data[0].content) {
-        setWords(data[0].content);
+        const loaded = data[0].content;
+        if (Array.isArray(loaded)) {
+          setWordbooks(loaded);
+          if (loaded.length > 0) setActiveBookId(loaded[0].id);
+        } else {
+          // 예전 방식(단일 배열) 로드 대응
+          const migrated = [{ id: 'sql-migrated', name: 'SQL Migrated', words: normalizeWords(loaded), createdAt: Date.now() }];
+          setWordbooks(migrated);
+          setActiveBookId('sql-migrated');
+        }
         alert(`📂 '${syncId}' 데이터 로드 완료.`);
       } else alert('ℹ️ 해당 ID로 저장된 데이터가 없습니다.');
     } catch (e) {
@@ -164,7 +239,14 @@ export const useWordData = () => {
         const text = await file.text();
         const data = JSON.parse(text);
         if (Array.isArray(data)) {
-          setWords(data);
+          // 파일 내용이 Wordbook[] 인지 Word[] 인지 체크
+          if (data.length > 0 && data[0].words) {
+            setWordbooks(data);
+            setActiveBookId(data[0].id);
+          } else {
+            // 단일 Word[] 라면 현재 단어장에 추가
+            setWords(data);
+          }
           alert('JSON 데이터를 불러왔습니다.');
         } else alert('올바른 형식이 아닙니다.');
       } catch (err) {
@@ -175,18 +257,20 @@ export const useWordData = () => {
   };
 
   const exportToJSON = () => {
-    if (words.length === 0) return alert('데이터가 없습니다.');
-    const blob = new Blob([JSON.stringify(words, null, 2)], { type: 'application/json' });
+    if (wordbooks.length === 0) return alert('데이터가 없습니다.');
+    const blob = new Blob([JSON.stringify(wordbooks, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `voca_backup_${new Date().toISOString().split('T')[0]}.json`;
+    a.download = `voca_full_backup_${new Date().toISOString().split('T')[0]}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
   return {
-    words, setWords, syncId, setSyncId, syncPassword, setSyncPassword, isSyncing,
+    words, setWords, wordbooks, activeBookId, setActiveBookId,
+    addWordbook, removeWordbook, renameWordbook,
+    syncId, setSyncId, syncPassword, setSyncPassword, isSyncing,
     saveToSQL, loadFromSQL, handleLinkFile, exportToJSON
   };
 };

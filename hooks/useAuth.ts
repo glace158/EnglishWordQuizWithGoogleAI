@@ -28,22 +28,35 @@ export const useAuth = (setWords: (words: any) => void) => {
   const [isLoading, setIsLoading] = useState(false);
 
   const handleLoginAction = useCallback(async () => {
-    if (!PROJECT_URL || !SQL_API_KEY || !SQL_AUTH_URL) {
-      console.error("Supabase Config Missing:", { PROJECT_URL, SQL_API_KEY });
-      setStatusMessage('서버 설정이 누락되었습니다. VITE_SUPABASE_URL를 확인하세요.');
-      return;
-    }
-
     if (!loginId.trim() || !password.trim()) {
       setStatusMessage('ID와 Password를 입력해주세요.');
       return;
     }
 
     setIsLoading(true);
-    setStatusMessage('서버 인증 시도 중...');
+    setStatusMessage('인증 시도 중...');
+
+    // --- 데모용 admin 계정 체크 (서버 없이 로그인) ---
+    if (loginId.trim() === 'admin' && password.trim() === 'admin123') {
+      setTimeout(() => {
+        setStatusMessage('데모 계정으로 접속합니다...');
+        setIsAuthorized(true);
+        sessionStorage.setItem('voca_auth_session', 'active');
+        localStorage.setItem('voca_user_registered', 'true');
+        setIsLoading(false);
+      }, 500);
+      return;
+    }
+    // ------------------------------------------
+
+    if (!PROJECT_URL || !SQL_API_KEY || !SQL_AUTH_URL) {
+      console.error("Supabase Config Missing:", { PROJECT_URL, SQL_API_KEY });
+      setStatusMessage('서버 설정이 누락되었습니다. VITE_SUPABASE_URL를 확인하세요.');
+      setIsLoading(false);
+      return;
+    }
 
     try {
-      // 이제 어떤 환경에서도 표준 SHA-256 해시가 생성됩니다.
       const idHash = await hashString(loginId.trim());
       const passHash = await hashString(password.trim());
 

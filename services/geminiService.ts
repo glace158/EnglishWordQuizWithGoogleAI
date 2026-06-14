@@ -1,5 +1,5 @@
 
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import { VoiceName } from "../types";
 
 /**
@@ -58,7 +58,6 @@ export const getRemainingQuota = () => Math.max(0, DAILY_QUOTA_LIMIT - getApiUsa
 /**
  * Gemini API Services for AI Learning Features
  */
-// 규정에 따라 process.env.API_KEY를 직접 사용합니다.
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 export const generateAISentence = async (word: string, meaning: string): Promise<string> => {
@@ -86,6 +85,137 @@ export const generateAIDictationSentence = async (word: string): Promise<string>
   } catch (error) {
     console.error("Gemini Dictation Error:", error);
     return "AI English sentence generation failed.";
+  }
+};
+
+export const generateDETTask = async (type: 'SPEAKING' | 'WRITING'): Promise<any> => {
+  incrementApiUsage();
+  const isSpeaking = type === 'SPEAKING';
+  const prepTime = "30 seconds";
+  const responseTime = isSpeaking ? "3 minutes" : "5 minutes";
+  const lengthConstraint = isSpeaking ? "25–30 seconds when spoken (about 50-70 words)" : "120–150 words";
+
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: `
+        Create a general Duolingo English Test (DET) style ${isSpeaking ? 'Speaking' : 'Writing'} question.
+        Choose a diverse and realistic topic suitable for an intermediate learner.
+        
+        Follow this exact structure:
+        [1. TEST TASK]
+        (The question prompt text ONLY. Do NOT include "Question:", "Prep time:", or "Response time:" labels.)
+
+        [2. KEY STRUCTURE]
+        (Provide exactly ONE reusable answer structure. Use simple bullet points like "• Step 1".)
+
+        [3. MODEL ANSWER]
+        (Length: ${lengthConstraint}. Level: Intermediate to Upper-intermediate. Natural but test-optimized. Clear organization, no complex vocabulary.)
+
+        [4. USER ACTION]
+        (Instructions for the user: "${isSpeaking ? 'Speak into the microphone to record your answer.' : 'Write your answer in the text box below.'}")
+
+        [5. SELF CHECK]
+        (Provide a checklist with exactly 3 items focusing on: 1. Organization, 2. Fluency/Clarity, 3. Use of specific examples. Output as a simple list separated by pipes "|")
+
+        CONSTRAINTS: 
+        - DO NOT explain grammar.
+        - DO NOT provide more than one structure.
+        - DO NOT include follow-up questions.
+        - DO NOT use markdown like bold (**), headers (#), or lines (---). 
+        - OUTPUT RAW TEXT ONLY.
+      `,
+    });
+    
+    const text = response.text || "";
+    const sections = text.split(/\[\d\.\s+.*?\]/);
+    
+    return {
+      task: sections[1]?.trim() || "Failed to generate task.",
+      prepTime,
+      responseTime,
+      structure: sections[2]?.trim() || "Structure unavailable.",
+      modelAnswer: sections[3]?.trim() || "Model answer unavailable.",
+      userAction: sections[4]?.trim() || (isSpeaking ? "Record your answer for up to 3 minutes." : "Write your answer for up to 5 minutes."),
+      selfCheck: sections[5]?.trim().split('|').map(s => s.trim()) || ["Organization", "Clarity", "Use of examples"]
+    };
+  } catch (error) {
+    console.error("Gemini DET Error:", error);
+    return null;
+  }
+};
+
+export const evaluateDETResponse = async (type: 'SPEAKING' | 'WRITING', task: string, userInput: string): Promise<any> => {
+  incrementApiUsage();
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: `
+        Evaluate this Duolingo English Test (DET) ${type} response based on standard DET criteria.
+        
+        Task: "${task}"
+        User's Answer: "${userInput}"
+
+        Respond ONLY in the following JSON format:
+        {
+          "scoreEstimate": "e.g., 85-95",
+          "overallFeedback": "Provide a cohesive summary of the performance and how to improve in Korean.",
+          "correctedAnswer": "A professional, higher-scoring version of the user's original answer, preserving their core ideas but improving grammar, vocabulary, and flow.",
+          "selfCheckResults": [
+            {
+              "title": "Organization",
+              "status": true or false,
+              "detail": "Detailed explanation of organization performance in English."
+            },
+            {
+              "title": "Clarity/Fluency",
+              "status": true or false,
+              "detail": "Detailed explanation of clarity or fluency performance in English."
+            },
+            {
+              "title": "Use of specific examples",
+              "status": true or false,
+              "detail": "Detailed explanation of how examples were used in English."
+            }
+          ]
+        }
+
+        CONSTRAINTS:
+        - overallFeedback must be in Korean.
+        - correctedAnswer must be in English.
+        - selfCheckResults details should be in English.
+        - DO NOT explain complex grammar rules.
+        - DO NOT ask follow-up questions.
+      `,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            scoreEstimate: { type: Type.STRING },
+            overallFeedback: { type: Type.STRING },
+            correctedAnswer: { type: Type.STRING },
+            selfCheckResults: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  title: { type: Type.STRING },
+                  status: { type: Type.BOOLEAN },
+                  detail: { type: Type.STRING }
+                },
+                required: ["title", "status", "detail"]
+              }
+            }
+          },
+          required: ["scoreEstimate", "overallFeedback", "correctedAnswer", "selfCheckResults"]
+        }
+      }
+    });
+    return JSON.parse(response.text?.trim() || '{}');
+  } catch (error) {
+    console.error("Gemini DET Evaluation Error:", error);
+    return null;
   }
 };
 
