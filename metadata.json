@@ -1,7 +1,6 @@
 {
-  "name": "Copy of VocaMaster AI",
-  "description": "An intelligent English vocabulary learning application featuring three quiz modes, AI-powered text-to-speech, and weighted random learning based on your progress.",
-  "requestFramePermissions": [
-    "microphone"
-  ]
-} 
+  "name": "VocaMaster AI",
+  "description": "High-Fidelity English Vocabulary Training Interface with custom interactive modes, CSV upload support, and Web Text-To-Speech pronunciation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

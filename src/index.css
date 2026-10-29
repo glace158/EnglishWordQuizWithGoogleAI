@@ -1,0 +1,56 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+/* Custom visual glow animations and scrollbars */
+@layer base {
+  body {
+    background-color: #080A10;
+    color: #F4F4F5;
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+}
+
+/* Custom premium visual glow effect wrapper */
+.glow-effect {
+  position: relative;
+}
+.glow-effect::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: 0 0 15px rgba(124, 58, 237, 0.45);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+}
+.glow-effect:hover::after {
+  opacity: 1;
+}
+
+/* Webkit scrollbar customization for table and lists */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0D0F14;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #252836;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3F3F46;
+}
+

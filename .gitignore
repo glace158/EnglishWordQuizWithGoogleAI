@@ -5,7 +5,7 @@
 .env.development.local
 .env.test.local
 .env.production.local
-
+.env.example
 # 의존성 패키지
 node_modules/
 jspm_packages/
